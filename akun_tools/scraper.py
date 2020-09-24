@@ -64,7 +64,7 @@ class AkunData:
         mu = self.node_url.format(story_id=story_id)
         if vl >= 2:
             output(f"Metadata URL: {mu}")
-        r = download_retry(mu)
+        r = download_retry(mu, download_delay=self.download_delay)
         r.raise_for_status()
         node = r.json()
         return node
@@ -72,7 +72,7 @@ class AkunData:
     def get_chapters(self, node: Dict[str, Any],
                      url: str) -> Iterator[List[Dict[str, Any]]]:
         vl, output = self.vl, self.output
-        num_chaps = len(node['bm'])
+        num_chaps = self.get_chapter_count(node)
         if vl >= 1:
             output(f"Found {num_chaps} chapters")
         chapter_starts = [i['ct'] for i in node['bm']]
@@ -126,8 +126,8 @@ class AkunData:
             d[i['_id']] = i
         print(qtoml.dumps(d))
 
-        fn = make_filename(self.story_info['t']) + ext
     def titlefn(self, ext: str = '.toml') -> str:
+        fn = make_filename(self.title) + ext
         return fn
 
     def enc_ext(self, encoder: Any) -> str:
@@ -144,13 +144,27 @@ class AkunData:
     def url(self, s: str) -> None:
         self._url = s
 
-    @property
-    def title(self):
-        return self.story_info['t']
+    @staticmethod
+    def get_title(node: Dict[str, Any]) -> str:
+        return node['t']
 
     @property
-    def author(self):
-        return self.story_info['u'][0]['n']
+    def title(self) -> str:
+        # return self.story_info['t']
+        return self.get_title(self.story_info)
+
+    @staticmethod
+    def get_chapter_count(node: Dict[str, Any]) -> int:
+        return len(node['bm'])
+
+    @staticmethod
+    def get_author(node: Dict[str, Any]) -> str:
+        return node['u'][0]['n']
+
+    @property
+    def author(self) -> str:
+        # return self.story_info['u'][0]['n']
+        return self.get_author(self.story_info)
 
     def write(self, fn: Any = None, encoder: Any = qtoml,
               enc_args: Dict[str, Any] = {'encode_none': 0}) -> None:
@@ -182,10 +196,18 @@ class AkunData:
         if hasattr(fn, 'read'):
             open_file = fn
             fn = open_file.name
+        elif os.path.exists(fn):
+            open_file = None
         else:
+            if isinstance(fn, bytes):
+                fn = fn.decode()
+            file_data = fn
+            fn = None
             open_file = None
 
         if decoder is None:
+            if fn is None:
+                raise ValueError("must provide decoder for raw data read")
             if fn.endswith('.toml'):
                 decoder = qtoml
             elif fn.endswith('.json'):
@@ -196,9 +218,11 @@ class AkunData:
 
         if open_file is not None:
             self.story_info = decoder.load(open_file)
-        else:
+        elif fn is not None:
             with open(fn, 'r') as inp:
                 self.story_info = decoder.load(inp)
+        else:
+            self.story_info = decoder.loads(file_data)
 
 
 class AkunStory:
@@ -217,6 +241,8 @@ class AkunStory:
 """
 
     def get_old_image(self, fn: str) -> Optional[bytes]:
+        if self.old_zip is None:
+            return None
         try:
             return self.old_zip.read(fn)
         except KeyError:
@@ -224,7 +250,9 @@ class AkunStory:
             for i in nl:
                 if i.startswith(fn):
                     return self.old_zip.read(i)
-            raise
+            return None
+        except Exception:  # for file-not-found, etc
+            return None
 
     image_types = { 'image/jpeg': '.jpg', 'image/png': '.png',
                     'image/gif': '.gif' }
@@ -249,17 +277,19 @@ class AkunStory:
         self.save_images = images
 
         self.html = ""
-        self.images_dl = {}
-        self.output_fn = None
-        self.old_zip = None
+        self.images_dl: Dict[str, str] = {}
+        self.output_fn: Optional[str] = None
+        self.old_zip: Optional[zipfile.ZipFile] = None
+        self.out_zip: Optional[zipfile.ZipFile] = None
 
-        if os.path.exists(inp):
-            if inp.endswith('.zip'):
-                self.read(inp)
+        if inp is not None:
+            if os.path.exists(inp):
+                if inp.endswith('.zip'):
+                    self.read(inp)
+                else:
+                    self.info.read(inp)
             else:
-                self.info.read(inp)
-        else:
-            self.info.download(inp)
+                self.info.download(inp)
 
     def read(self, fn) -> None:
         self.output_fn = fn
@@ -270,37 +300,49 @@ class AkunStory:
                 data_fn = i
                 break
         if data_fn:
-            self.info.read(self.old_zip.open(data_fn))
+            with self.old_zip.open(data_fn) as dfh:
+                data_bytes = dfh.read()
+            decoder = qtoml if data_fn.endswith('.toml') else json
+            self.info.read(data_bytes, decoder=decoder)
         else:
             raise ValueError(f"couldn't find metadata in zipfile '{fn}'")
 
-    def gen_html(self):
-        node = self.info.story_info
-        vl, output = self.vl, self.output
+    @staticmethod
+    def fix_images(html: str, delete: bool = False) -> Tuple[
+            str, Dict[str, str]]:
+        soup = BeautifulSoup(html, 'html5lib')
+        rv = {}
+        for i in soup('img'):
+            bn = i['src'].split('/')[-1]
+            rv[bn] = i['src']
+            if delete:
+                i.decompose()
+            else:
+                i.replace_with(soup.new_tag('img', src=bn))
+        return str(soup), rv
 
-        title = self.info.title
-        author = self.info.author
-        html_fn = make_filename(title) + '.html'
-        self.html += self.header_html.format(title=title, author=author)
-        for co in node['chapters']:
+    @classmethod
+    def gen_html(cls, node, chapters,
+                 delete_images: bool = False) -> Iterator[
+                     Tuple[str, Dict[str, str]]]:
+        # node = self.info.story_info
+        # vl, output = self.vl, self.output
+
+        title = AkunData.get_title(node)
+        author = AkunData.get_author(node)
+        yield (cls.header_html.format(title=title, author=author), {})
+        for co in chapters:
             if (co['nt'] == 'chapter' and not
                 ('t' in co and co['t'].startswith('#special'))):
                 if 't' in co and co['t'] != '':
-                    self.html += ("<h2 class=\"chapter\">{}</h2>\n".
-                                  format(co['t']))
+                    yield (("<h2 class=\"chapter\">{}</h2>\n".
+                            format(co['t'])), {})
                 else:
-                    self.html += "<hr>\n"
-                soup = BeautifulSoup(co['b'], 'html5lib')
-                for i in soup('img'):
-                    if self.save_images:
-                        # if output and vl >= 1:
-                        #     output(i['src'])
-                        bn = i['src'].split('/')[-1]
-                        self.images_dl[bn] = i['src']
-                        i.replace_with(soup.new_tag('img', src=bn))
-                    else:
-                        i.decompose()
-                self.html += str(soup) + "\n"
+                    yield ("<hr>\n", {})
+                chap_html, chap_imgs = cls.fix_images(
+                    co['b'], delete=delete_images)
+                yield (chap_html + "\n", chap_imgs)
+                # self.images_dl.update(chap_imgs)
             elif co['nt'] == 'choice':
                 try:
                     if 'choices' not in co or 'votes' not in co:
@@ -321,15 +363,29 @@ class AkunStory:
                                 except KeyError:
                                     pass
                     cd = { co['choices'][i]: vc[i] for i in range(len(vc)) }
-                    self.html += "<hr>\n<ul>\n"
+                    yield ("<hr>\n<ul>\n", {})
                     for i in sorted(cd.items(), key=itemgetter(1),
                                     reverse=True):
-                        self.html += "<li>{} -- {}</li>\n".format(i[0], i[1])
-                    self.html += "</ul>\n"
+                        yield ("<li>{} -- {}</li>\n".format(i[0], i[1]), {})
+                    yield ("</ul>\n", {})
                 except BaseException:
                     print(co)
                     raise
-        self.html += self.footer_html
+            else:
+                # we do this to ensure we yield at least one result per member
+                # of the chapters iterator
+                yield ('', {})
+        yield (cls.footer_html, {})
+
+    def collect_html(self) -> None:
+        # self.html = ''.join(self.gen_html())
+        self.html = ''
+        self.images_dl = {}
+        for html, imgs in self.gen_html(self.info.story_info,
+                                        self.info.story_info['chapters'],
+                                        not self.save_images):
+            self.html += html
+            self.images_dl.update(imgs)
 
     def get_images(self) -> None:
         vl, output = self.vl, self.output
@@ -338,14 +394,17 @@ class AkunStory:
             if vl >= 1:
                 output(f"\r\x1b[KDownloading image {self.images_dl[bn]}",
                        end='')
+            idata = self.get_old_image(bn)
+            if idata is None:
+                try:
+                    ir = requests.get(self.images_dl[bn])
+                    idata = ir.content
+                except Exception:  # network errors etc
+                    continue
             try:
-                idata = self.get_old_image(bn)
-            except Exception as e:
-                if vl >= 2:
-                    output(e)
-                ir = requests.get(self.images_dl[bn])
-                idata = ir.content
-            new_bn = self.get_image_fn(bn, idata)
+                new_bn = self.get_image_fn(bn, idata)
+            except Exception:  # failed to get data type
+                continue
             if new_bn != bn:
                 self.html = self.html.replace(bn, new_bn)
             # don't bother re-compressing images
@@ -382,7 +441,7 @@ class AkunStory:
 @click.group()
 @click.option("--verbose", "-v", is_flag=True, help="Be verbose")
 @click.pass_context
-def scraper(ctx, verbose):
+def scraper(ctx, verbose: bool) -> None:
     ctx.ensure_object(dict)
 
     vi = 1
@@ -429,7 +488,7 @@ def download(ctx, infile: str, images: bool) -> None:
     s = AkunStory(infile, images, vl)
     if infile.endswith('.zip'):
         s.info.download()
-    s.gen_html()
+    s.collect_html()
     s.write()
     # with open(infile) as inp:
     #     try:
