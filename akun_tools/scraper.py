@@ -7,10 +7,23 @@ import io, zipfile, time, os, datetime
 import json, qtoml
 import click, magic
 from operator import itemgetter
+from itertools import chain
 
 def make_filename(title):
     title = title.lower().replace(" ", "_")
     return re.sub("[^a-z0-9_]", "", title)
+
+def download_retry(url, tries=3, download_delay=0.5):
+    for i in range(tries):
+        r = requests.get(url)
+        try:
+            r.raise_for_status()
+        except Exception:
+            if i >= tries - 1:
+                raise
+            time.sleep(download_delay * (2 ** (i + 2)))
+        else:
+            return r
 
 class AkunData:
     node_url = 'https://fiction.live/api/node/{story_id}'
@@ -37,26 +50,29 @@ class AkunData:
         self.download_delay = download_delay
         self._url = None
 
-    def download(self, url=None):
+    def get_metadata(self, url=None):
         vl, output = self.vl, self.output
         if url is None:
             url = self.url
+
         story_id = self.id_from_url(url)
         mu = self.node_url.format(story_id=story_id)
         if vl >= 2:
             output(f"Metadata URL: {mu}")
-        r = requests.get(mu)
+        r = download_retry(mu)
         r.raise_for_status()
         node = r.json()
-        if vl >= 3:
-            output(str(node))
+        return node
+
+    def get_chapters(self, node, url):
+        vl, output = self.vl, self.output
         num_chaps = len(node['bm'])
         if vl >= 1:
             output(f"Found {num_chaps} chapters")
         chapter_starts = [i['ct'] for i in node['bm']]
         chapter_starts[0] = 0
         chapter_starts.append(9999999999999999)
-        story = []
+        story_id = self.id_from_url(url)
         for i, (s, e) in enumerate([(chapter_starts[i],
                                      chapter_starts[i + 1] - 1)
                                     for i in range(len(node['bm']))]):
@@ -67,9 +83,20 @@ class AkunData:
             elif vl >= 2:
                 print(f"Chapter {i+1}/{num_chaps} URL: {su}")
             time.sleep(self.download_delay)
-            r = requests.get(su)
-            r.raise_for_status()
-            story.extend(r.json())
+            r = download_retry(su, download_delay=self.download_delay)
+            yield r.json()
+
+    def download(self, url=None):
+        vl, output = self.vl, self.output
+        if url is None:
+            url = self.url
+
+        node = self.get_metadata(url)
+
+        if vl >= 3:
+            output(str(node))
+
+        story = list(chain.from_iterable(self.get_chapters(node, url)))
         node['original_url'] = url
         node['chapters'] = story
         self.story_info = node
@@ -347,6 +374,8 @@ class AkunStory:
 @click.option("--verbose", "-v", is_flag=True, help="Be verbose")
 @click.pass_context
 def scraper(ctx, verbose):
+    ctx.ensure_object(dict)
+
     vi = 1
     if verbose:
         vi = 2
@@ -364,13 +393,13 @@ def scraper(ctx, verbose):
 def getinfo(ctx, download_delay, format, url):
     """Download story data from anonkun. Writes raw data to disk."""
     vl = ctx.obj['verbose']
-    s = AkunData(vl=vl)
+    s = AkunData(vl=vl, download_delay=download_delay)
     old_fn = None
     if os.path.exists(url):
         s.read(url)
         old_fn = url
         url = None
-    s.download(download_delay, url)
+    s.download(url)
     if format == 'toml':
         s.write(old_fn)
     elif format == 'json':
