@@ -1,0 +1,172 @@
+<html>
+  <head>
+    <title>Fiction.live scraper</title>
+    <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+    <script src="{{ url_for('static', filename='jszip.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='FileSaver.min.js') }}"></script>
+    <script>
+     $(function () {
+       var html_data = '';
+       var toml_data = '';
+       var metadata;
+       var latest_chapter = 0;
+       var downloads_running = 1;
+       var zipf;
+       var image_name_fixes = {};
+
+       var image_extensions = {
+         'image/jpeg': '.jpg',
+         'image/png': '.png',
+         'image/gif': '.gif',
+       }
+
+       function fix_html_images() {
+         for (let bn in image_name_fixes) {
+           let realname = image_name_fixes[bn];
+           
+         }
+       }
+       
+       function try_finish() {
+         downloads_running--;
+         console.log("try_finish: ", downloads_running);
+         if (downloads_running === 0) {
+           zipf.generateAsync({
+             type: 'blob',
+             compression: 'DEFLATE',
+           }).then(function (b) {
+             saveAs(b, metadata['zip_fn']);
+           });
+         }
+       }
+       function get_image(bn, url) {
+         downloads_running++;
+         let img_html = $('#images').html();
+         $('#images').html(img_html + url + '<br />');
+         $.ajax(url, {
+           xhrFields: {
+             responseType: 'blob',
+           },
+           success: function (data, status, jqXHR) {
+             let hdr_type = jqXHR.getResponseHeader("content-type") || '';
+             /* console.log('Blob type: ', data.type);
+              * console.log('Header type: ', hdr_type);*/
+             let real_dt = hdr_type || data.type;
+
+             let zip_fn = bn;
+             let ext = image_extensions[real_dt];
+             if (ext === undefined) {
+               console.log("ERROR: undefined mimetype ", hdr_type);
+               try_finish();
+               return;
+             }
+             if (!zip_fn.endsWith(ext)) {
+               zip_fn = zip_fn + ext;
+             }
+             if (zip_fn !== bn) {
+               image_name_fixes[bn] = zip_fn;
+             }
+
+             zipf.file(zip_fn, data, {
+               // images are already compressed natively
+               compression: 'STORE',
+             });
+             
+             try_finish();
+           },
+         }).fail(function (data) {
+           try_finish();
+         });
+       }
+       function handle_json_record(r) {
+         // console.log("handle_json_record called");
+         let keys = Object.keys(r);
+         if (keys.includes('title')) { // first record
+           metadata = r;
+           toml_data = toml_data.concat(r['toml']);
+           $('#quest_title').html("Quest: " + r['title']);
+           zipf = JSZip();
+           /* show_status(
+            *   `Found quest ${r['title']} with ${r['chapter_count']} chapters`
+            * );*/
+         }
+         else if (keys.includes('html')) { // chapter record
+           html_data = html_data.concat(r['html']);
+           toml_data = toml_data.concat(r['toml']);
+           // console.log(r['imgs']);
+           if (r['chapnum'] !== latest_chapter) {
+             latest_chapter = r['chapnum'];
+             $('#progress').html(`Chapter ${latest_chapter}/${metadata['chapter_count']}`);
+             /* show_status(`Got chapter ${latest_chapter}`);*/
+           }
+           for (let bn in r['imgs']) {
+             console.log(bn, r['imgs'][bn]);
+             get_image(bn, r['imgs'][bn]);
+           }
+         } else if (keys.includes('status')) { // final sentinel
+           console.log("finishing up");
+           /* let zipf = JSZip();*/
+           zipf.file(metadata['toml_fn'], toml_data);
+           zipf.file(metadata['html_fn'], html_data);
+           try_finish();
+         }
+       }
+       
+       $('#download_button').click(function () {
+         let url = $('#quest_url').val();
+         $('.submit_form').prop('disabled', true);
+         let last_response_len = false;
+         let json_accum = '';
+         function handle_data (response) {
+           var this_response;
+           // console.log("handle_data called");
+           // console.log('Full response: ', response);
+           if (last_response_len === false) {
+             this_response = response;
+             last_response_len = response.length;
+           } else {
+             this_response = response.substring(last_response_len);
+             last_response_len = response.length;
+           }
+           // console.log('Partial response: ', this_response);
+           json_accum = json_accum.concat(this_response);
+           while (1) {
+             let ind = json_accum.indexOf('};\n');
+             if (ind != -1) {
+               let jd = json_accum.slice(0, ind + 1);
+               // console.log(jd);
+               let json_obj = JSON.parse(jd);
+               handle_json_record(json_obj);
+               json_accum = json_accum.slice(ind + 3);
+             } else {
+               break;
+             }
+           }
+         }
+         $.ajax('/download', {
+           method: 'POST',
+           data: { quest_url: url },
+           xhrFields: {
+             onprogress: function (e) {
+               var r = e.currentTarget.response;
+               // console.log("onprogress called");
+               handle_data(r);
+             },
+           },
+           success: function (d, s, j) {
+             // console.log("success called");
+             handle_data(d);
+           }
+         });
+       });
+     });
+    </script>
+  </head>
+  <body>
+    <h2>Archive quest</h2>
+    Quest URL: <input type="text" id="quest_url" class="submit_form">&nbsp;<button id="download_button" class="submit_form">Archive</button><br />
+    <div id="quest_title"></div>
+    <div id="progress"></div>
+    <div id="images"></div>
+  </body>
+</html>

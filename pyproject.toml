@@ -21,6 +21,7 @@ qtoml = "^0.3.0"
 click = "^7.1.2"
 python-magic = "^0.4.18"
 html5lib = "^1.1"
+flask = "^1.1.2"
 
 [tool.poetry.dev-dependencies]
 mypy = "^0.782"
