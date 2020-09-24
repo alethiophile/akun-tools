@@ -4,6 +4,14 @@ version = "0.1.0"
 description = "Tools for interacting with anonkun/fiction.live"
 authors = ["alethiophile <alethiophile.dev@gmail.com>"]
 license = "MIT"
+readme = "README.rst"
+repository = "https://github.com/alethiophile/qtoml"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Software Development :: Libraries :: Python Modules"
+]
 
 [tool.poetry.dependencies]
 python = "^3.8"
