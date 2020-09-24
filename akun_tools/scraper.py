@@ -9,11 +9,14 @@ import click, magic
 from operator import itemgetter
 from itertools import chain
 
-def make_filename(title):
+from typing import Iterator, Tuple, Dict, Optional, Any, Callable, List
+
+def make_filename(title: str) -> str:
     title = title.lower().replace(" ", "_")
     return re.sub("[^a-z0-9_]", "", title)
 
-def download_retry(url, tries=3, download_delay=0.5):
+def download_retry(url: str, tries: int = 3,
+                   download_delay: float = 0.5) -> requests.models.Response:
     for i in range(tries):
         r = requests.get(url)
         try:
@@ -24,6 +27,7 @@ def download_retry(url, tries=3, download_delay=0.5):
             time.sleep(download_delay * (2 ** (i + 2)))
         else:
             return r
+    return r
 
 class AkunData:
     node_url = 'https://fiction.live/api/node/{story_id}'
@@ -35,22 +39,23 @@ class AkunData:
     url_re = re.compile(r"https://fiction.live/stories/[^/]+/([^/]+)/?")
 
     @classmethod
-    def id_from_url(cls, url):
+    def id_from_url(cls, url: str) -> str:
         o = cls.url_re.match(url)
         if o is None:
             raise ValueError("bad url {}".format(url))
         return o.group(1)
 
-    def __init__(self, download_delay=0.5, vl=1, output=print):
+    def __init__(self, download_delay: float = 0.5, vl: int = 1,
+                 output: Callable[[str], None] = print) -> None:
         self.vl = vl
         if not output:
             # a no-op
             output = lambda *args, **kwargs: None
         self.output = output
         self.download_delay = download_delay
-        self._url = None
+        self._url: Optional[str] = None
 
-    def get_metadata(self, url=None):
+    def get_metadata(self, url: Optional[str] = None) -> Dict[str, Any]:
         vl, output = self.vl, self.output
         if url is None:
             url = self.url
@@ -64,7 +69,8 @@ class AkunData:
         node = r.json()
         return node
 
-    def get_chapters(self, node, url):
+    def get_chapters(self, node: Dict[str, Any],
+                     url: str) -> Iterator[List[Dict[str, Any]]]:
         vl, output = self.vl, self.output
         num_chaps = len(node['bm'])
         if vl >= 1:
@@ -86,7 +92,7 @@ class AkunData:
             r = download_retry(su, download_delay=self.download_delay)
             yield r.json()
 
-    def download(self, url=None):
+    def download(self, url: Optional[str] = None) -> None:
         vl, output = self.vl, self.output
         if url is None:
             url = self.url
@@ -101,7 +107,7 @@ class AkunData:
         node['chapters'] = story
         self.story_info = node
 
-    def download_chat(self):
+    def download_chat(self) -> None:
         sid = self.id_from_url(self.url)
         r = requests.post(self.chat_pages_url, data={'r': sid})
         comment_count = r.json()['count']
@@ -120,22 +126,22 @@ class AkunData:
             d[i['_id']] = i
         print(qtoml.dumps(d))
 
-    def titlefn(self, ext='.toml'):
         fn = make_filename(self.story_info['t']) + ext
+    def titlefn(self, ext: str = '.toml') -> str:
         return fn
 
-    def enc_ext(self, encoder):
+    def enc_ext(self, encoder: Any) -> str:
         return ('.toml' if encoder == qtoml else '.json' if encoder == json
                 else '')
 
     @property
-    def url(self):
-        if not self._url:
+    def url(self) -> str:
+        if self._url is None:
             self._url = self.story_info['original_url']
         return self._url
 
     @url.setter
-    def url(self, s):
+    def url(self, s: str) -> None:
         self._url = s
 
     @property
@@ -146,7 +152,8 @@ class AkunData:
     def author(self):
         return self.story_info['u'][0]['n']
 
-    def write(self, fn=None, encoder=qtoml, enc_args={'encode_none': 0}):
+    def write(self, fn: Any = None, encoder: Any = qtoml,
+              enc_args: Dict[str, Any] = {'encode_none': 0}) -> None:
         vl, output = self.vl, self.output
         open_file = None
         if fn is None:
@@ -171,7 +178,7 @@ class AkunData:
         if vl >= 1:
             output("Story data written to {}".format(fn))
 
-    def read(self, fn, decoder=None):
+    def read(self, fn: Any, decoder: Any = None) -> None:
         if hasattr(fn, 'read'):
             open_file = fn
             fn = open_file.name
@@ -209,7 +216,7 @@ class AkunStory:
 </html>
 """
 
-    def get_old_image(self, fn):
+    def get_old_image(self, fn: str) -> Optional[bytes]:
         try:
             return self.old_zip.read(fn)
         except KeyError:
@@ -223,7 +230,7 @@ class AkunStory:
                     'image/gif': '.gif' }
 
     @classmethod
-    def get_image_fn(cls, bn, data):
+    def get_image_fn(cls, bn: str, data: bytes) -> str:
         ct = magic.from_buffer(data, mime=True)
         if ct not in cls.image_types:
             raise Exception(f"File '{bn}' has non-image type '{ct}'")
@@ -232,7 +239,7 @@ class AkunStory:
         return bn
 
     def __init__(self, inp, images=True, download_delay=0.5, vl=1,
-                 output=print):
+                 output=print) -> None:
         if not output:
             # a no-op
             output = lambda *args, **kwargs: None
@@ -254,7 +261,7 @@ class AkunStory:
         else:
             self.info.download(inp)
 
-    def read(self, fn):
+    def read(self, fn) -> None:
         self.output_fn = fn
         self.old_zip = zipfile.ZipFile(fn, 'r')
         data_fn = None
@@ -324,8 +331,9 @@ class AkunStory:
                     raise
         self.html += self.footer_html
 
-    def get_images(self):
+    def get_images(self) -> None:
         vl, output = self.vl, self.output
+        assert self.out_zip is not None
         for bn in self.images_dl:
             if vl >= 1:
                 output(f"\r\x1b[KDownloading image {self.images_dl[bn]}",
@@ -346,7 +354,8 @@ class AkunStory:
         if vl >= 1:
             output()
 
-    def write(self, fn=None, data_enc=qtoml, data_enc_args={'encode_none': 0}):
+    def write(self, fn=None, data_enc=qtoml,
+              data_enc_args={'encode_none': 0}) -> None:
         if fn is None:
             if self.output_fn:
                 fn = self.output_fn
@@ -390,16 +399,17 @@ def scraper(ctx, verbose):
               help="Write output as JSON")
 @click.argument('url')
 @click.pass_context
-def getinfo(ctx, download_delay, format, url):
+def getinfo(ctx, download_delay: float, format: str, url: str) -> None:
     """Download story data from anonkun. Writes raw data to disk."""
     vl = ctx.obj['verbose']
     s = AkunData(vl=vl, download_delay=download_delay)
     old_fn = None
+    pass_url: Optional[str] = url
     if os.path.exists(url):
         s.read(url)
         old_fn = url
-        url = None
-    s.download(url)
+        pass_url = None
+    s.download(pass_url)
     if format == 'toml':
         s.write(old_fn)
     elif format == 'json':
@@ -410,7 +420,7 @@ def getinfo(ctx, download_delay, format, url):
               help="Include images in output file")
 @click.argument('infile')
 @click.pass_context
-def download(ctx, infile, images):
+def download(ctx, infile: str, images: bool) -> None:
     """Write a zipfile with all story data. Includes an HTML ebook, all referenced
     images, and the raw metadata.
 
