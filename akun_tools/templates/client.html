@@ -1,12 +1,39 @@
 <html>
   <head>
     <title>Fiction.live scraper</title>
+    <style type="text/css">
+     #images {
+       max-height: 15em;
+       overflow-y: scroll;
+       font-family: monospace;
+     }
+
+     #status_view {
+       display: none;
+     }
+
+     #quest_title {
+       margin: 1em 2em;
+     }
+    </style>
     <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
     <script src="{{ url_for('static', filename='jszip.min.js') }}"></script>
     <script src="{{ url_for('static', filename='FileSaver.min.js') }}"></script>
     <script>
+     // this is a builtin in recent browsers, but not mine
+     String.prototype.replaceAll = function (s1, s2) {
+       var cur_s = this;
+       var cur_ind = 0;
+       while ((cur_ind = cur_s.indexOf(s1, cur_ind)) > -1) {
+         cur_s = cur_s.slice(0, cur_ind) + cur_s.slice(cur_ind).replace(s1, s2);
+         cur_ind += s2.length;
+       }
+       return cur_s;
+     }
+
      $(function () {
-       var html_data = '';
+       var html_data = [];
+       var html_string = '';
        var toml_data = '';
        var metadata;
        var latest_chapter = 0;
@@ -21,16 +48,68 @@
        }
 
        function fix_html_images() {
+         /* for (let bn in image_name_fixes) {
+          *   let realname = image_name_fixes[bn];
+          *   html_data = html_data.replaceAll(bn, realname);
+          * }*/
+         console.log("started fix_html_images");
+         /* for (let data of html_data) {
+          *   for (let bn of data['img_bns']) {
+          *     let new_fn = image_name_fixes[bn];
+          *     if (new_fn !== undefined) {
+          *       data['html'] = data['html'].replaceAll(bn, new_fn);
+          *     }
+          *   }
+          * }
+          * html_string = html_data.map(v => v.html).join('');*/
          for (let bn in image_name_fixes) {
            let realname = image_name_fixes[bn];
-           
+           html_string = html_string.replaceAll(bn, realname);
+         }
+         console.log("done fix_html_images");
+       }
+
+       function fix_image_url (url) {
+         let cloudfront_re = /^https:\/\/\w+\.cloudfront.net\//;
+         if (cloudfront_re.test(url)) {
+           return url.replace(cloudfront_re, 'https://cdn.fiction.live/h1200-w1200/');
+         } else {
+           return url;
          }
        }
+
+       var anim_interval = undefined;
+       function animate_progress() {
+         let s = $('#progress-spin').html();
+         if (s == '.') {
+           s = '..';
+         } else if (s == '..') {
+           s = '...';
+         } else if (s == '...') {
+           s = '... ';
+         } else if (s == '... ') {
+           s = '.';
+         }
+         $('#progress-spin').html(s);
+       }
        
+       function set_progress(s) {
+         $('#progress-text').html(s);
+         if (anim_interval === undefined) {
+           console.log('setting interval');
+           anim_interval = window.setInterval(animate_progress, 250);
+           console.log(anim_interval);
+         }
+       }
+
        function try_finish() {
          downloads_running--;
-         console.log("try_finish: ", downloads_running);
+         // console.log("try_finish: ", downloads_running);
          if (downloads_running === 0) {
+           fix_html_images();
+           zipf.file(metadata['toml_fn'], toml_data);
+           zipf.file(metadata['html_fn'], html_string);
+           set_progress('Generating archive');
            zipf.generateAsync({
              type: 'blob',
              compression: 'DEFLATE',
@@ -39,18 +118,24 @@
            });
          }
        }
-       function get_image(bn, url) {
-         downloads_running++;
+       function add_img_url(url) {
          let img_html = $('#images').html();
          $('#images').html(img_html + url + '<br />');
+         $('#images').scrollTop($('#images')[0].scrollHeight);
+       }
+       function get_image(bn, url) {
+         downloads_running++;
+         url = fix_image_url(url);
+         add_img_url(url);
          $.ajax(url, {
            xhrFields: {
              responseType: 'blob',
            },
+           timeout: 30000,
            success: function (data, status, jqXHR) {
              let hdr_type = jqXHR.getResponseHeader("content-type") || '';
-             /* console.log('Blob type: ', data.type);
-              * console.log('Header type: ', hdr_type);*/
+             // I don't actually know if Blob.type is set any way other than
+             // from the content-type header, but hey, why not
              let real_dt = hdr_type || data.type;
 
              let zip_fn = bn;
@@ -84,30 +169,25 @@
          if (keys.includes('title')) { // first record
            metadata = r;
            toml_data = toml_data.concat(r['toml']);
-           $('#quest_title').html("Quest: " + r['title']);
+           $('#quest_title').html(r['title']);
            zipf = JSZip();
-           /* show_status(
-            *   `Found quest ${r['title']} with ${r['chapter_count']} chapters`
-            * );*/
          }
          else if (keys.includes('html')) { // chapter record
-           html_data = html_data.concat(r['html']);
+           html_string = html_string.concat(r['html']);
            toml_data = toml_data.concat(r['toml']);
-           // console.log(r['imgs']);
            if (r['chapnum'] !== latest_chapter) {
              latest_chapter = r['chapnum'];
-             $('#progress').html(`Chapter ${latest_chapter}/${metadata['chapter_count']}`);
+             set_progress(`Downloading chapter ${latest_chapter + 1}/${metadata['chapter_count']}`);
              /* show_status(`Got chapter ${latest_chapter}`);*/
            }
            for (let bn in r['imgs']) {
-             console.log(bn, r['imgs'][bn]);
+             // console.log(bn, r['imgs'][bn]);
              get_image(bn, r['imgs'][bn]);
            }
          } else if (keys.includes('status')) { // final sentinel
            console.log("finishing up");
+           set_progress("Downloading remaining images");
            /* let zipf = JSZip();*/
-           zipf.file(metadata['toml_fn'], toml_data);
-           zipf.file(metadata['html_fn'], html_data);
            try_finish();
          }
        }
@@ -115,6 +195,8 @@
        $('#download_button').click(function () {
          let url = $('#quest_url').val();
          $('.submit_form').prop('disabled', true);
+         $('#status_view').show();
+         set_progress('Downloading metadata');
          let last_response_len = false;
          let json_accum = '';
          function handle_data (response) {
@@ -165,8 +247,11 @@
   <body>
     <h2>Archive quest</h2>
     Quest URL: <input type="text" id="quest_url" class="submit_form">&nbsp;<button id="download_button" class="submit_form">Archive</button><br />
-    <div id="quest_title"></div>
-    <div id="progress"></div>
-    <div id="images"></div>
+    <div id="status_view">
+      <h3 id="quest_title"></h3>
+      <div id="progress"><span id="progress-text"></span><span id="progress-spin">...</span></div>
+      <h4>Images found</h4>
+      <div id="images"></div>
+    </div>
   </body>
 </html>
