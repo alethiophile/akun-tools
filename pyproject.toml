@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "akun-tools"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tools for interacting with anonkun/fiction.live"
 authors = ["alethiophile <alethiophile.dev@gmail.com>"]
 license = "MIT"
