@@ -11,8 +11,13 @@ requests = "^2.24.0"
 beautifulsoup4 = "^4.9.1"
 qtoml = "^0.3.0"
 click = "^7.1.2"
+python-magic = "^0.4.18"
+html5lib = "^1.1"
 
 [tool.poetry.dev-dependencies]
+
+[tool.poetry.scripts]
+akun_scraper = 'akun_tools.scraper:scraper'
 
 [build-system]
 requires = ["poetry>=0.12"]
