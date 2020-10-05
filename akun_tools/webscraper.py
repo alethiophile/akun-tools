@@ -1,30 +1,38 @@
 #!python3
 
-from flask import Flask, render_template, request, Response, \
-    stream_with_context
+from quart import render_template, request, Response, stream_with_context
+from quart_trio import QuartTrio
 from .scraper import AkunData, AkunStory, make_filename
 import qtoml
 from json import dumps
 from itertools import chain
 
-from typing import Iterator, Dict, Any
+from typing import AsyncIterator, Dict, Any
 
-app = Flask(__name__)
+app = QuartTrio(__name__)
 
 @app.route('/')
-def index() -> str:
-    return render_template('client.html')
+async def index() -> str:
+    return await render_template('client.html')
 
 DOWNLOAD_INT = 1.0
 
 @app.route('/download', methods=['POST'])
-def download_quest() -> Response:
-    url = request.form['quest_url']
+async def download_quest() -> Response:
+    url = (await request.form)['quest_url']
     json_spacer = ';\n'
 
-    def flask_stream() -> Iterator[str]:
+    def encode_stream(s: AsyncIterator[str]):
+        async def wrapper() -> AsyncIterator[bytes]:
+            async for i in s():
+                yield i.encode()
+        return wrapper
+
+    @stream_with_context
+    @encode_stream
+    async def flask_stream() -> AsyncIterator[str]:
         data_obj = AkunData(download_delay=DOWNLOAD_INT, vl=2)
-        node = data_obj.get_metadata(url)
+        node = await data_obj.get_metadata(url)
         data: Dict[str, Any] = {
             'title': AkunData.get_title(node),
             'author': AkunData.get_author(node),
@@ -46,9 +54,9 @@ def download_quest() -> Response:
         # gen_html(), we wrap the chapters iterator in this function, which
         # provides all the chapter objects while also doing TOML encoding and
         # passing the results through the nonlocal variable
-        def provide_chapters() -> Iterator[Dict[str, Any]]:
+        async def provide_chapters() -> AsyncIterator[Dict[str, Any]]:
             nonlocal current_toml, chapnum
-            for cl in data_obj.get_chapters(node, url):
+            async for cl in data_obj.get_chapters(node, url):
                 chapnum += 1
                 for chapter in cl:
                     current_toml = qtoml.dumps({ 'chapters': [chapter] },
@@ -56,7 +64,7 @@ def download_quest() -> Response:
                     yield chapter
 
         # story_obj = AkunStory(None, download_delay=DOWNLOAD_INT, vl=2)
-        for html, imgs in AkunStory.gen_html(node, provide_chapters()):
+        async for html, imgs in AkunStory.gen_html(node, provide_chapters()):
             # this code is guaranteed to run between iterations of
             # provide_chapters(), so TOML data is never lost
             response = {
@@ -70,5 +78,7 @@ def download_quest() -> Response:
             yield dumps(response) + json_spacer
         yield dumps({ 'status': 'done' }) + json_spacer
 
-    return Response(stream_with_context(flask_stream()),
-                    mimetype='text/plain')
+    rv = Response(flask_stream(),
+                  mimetype='text/plain')
+    rv.timeout = None  # for large quests this can take a long time
+    return rv

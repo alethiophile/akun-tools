@@ -9,7 +9,7 @@ from operator import itemgetter
 from urllib.parse import urlsplit
 
 from typing import (Tuple, Dict, Optional, Any, Callable, List,
-                    AsyncIterator, Set)
+                    AsyncIterator, Set, Iterator)
 
 import logging
 logger = logging.getLogger(__name__)
@@ -37,6 +37,10 @@ def url_get_hostname(url: str) -> str:
     u = urlsplit(url)
     assert u.hostname is not None
     return u.hostname
+
+async def to_async_iterator(it: Iterator[Any]) -> AsyncIterator[Any]:
+    for i in it:
+        yield i
 
 class Downloader:
     """This class mediates all downloads by the program and enforces that at least
@@ -79,8 +83,8 @@ class Downloader:
                     else:
                         return r
                 return r
-        except BaseException:
-            print(self.urls_waiting)
+        except BaseException as e:
+            print("error in download_retry", e, self.urls_waiting)
             raise
         finally:
             self.urls_waiting[host].remove(url)
@@ -415,11 +419,16 @@ class AkunStory:
             chapter_len = len(chapters)
         except TypeError:
             chapter_len = '(unknown)'
+        if hasattr(chapters, '__aiter__'):
+            async_chapters = chapters
+        else:
+            async_chapters = to_async_iterator(chapters)
         yield (cls.header_html.format(title=title, author=author), {})
-        for i, co in enumerate(chapters):
+        cnum = 0
+        async for co in async_chapters:
             # yield to let downloads happen
             await trio.sleep(0)
-            logger.debug(f"chapters: {i}/{chapter_len}")
+            logger.debug(f"chapters: {cnum}/{chapter_len}")
             if (co['nt'] == 'chapter' and not
                 ('t' in co and co['t'].startswith('#special'))):
                 if 't' in co and co['t'] != '':
@@ -463,6 +472,7 @@ class AkunStory:
                 # we do this to ensure we yield at least one result per member
                 # of the chapters iterator
                 yield ('', {})
+            cnum += 1
         yield (cls.footer_html, {})
 
     async def collect_html(self, concurrent_images: bool = False) -> None:
